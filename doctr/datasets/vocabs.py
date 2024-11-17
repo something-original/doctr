@@ -25,8 +25,10 @@ VOCABS: Dict[str, str] = {
     "hindi_punctuation": "।,?!:्ॐ॰॥॰",
     "bangla_letters": "অআইঈউঊঋএঐওঔকখগঘঙচছজঝঞটঠডঢণতথদধনপফবভমযরলশষসহ়ঽািীুূৃেৈোৌ্ৎংঃঁ",
     "bangla_digits": "০১২৩৪৫৬৭৮৯",
-    "generic_cyrillic_letters": "абвгдежзийклмнопрстуфхцчшщьюяАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЬЮЯ",
+    "generic_cyrillic_letters": "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
 }
+
+VOCABS["russian"] = VOCABS["generic_cyrillic_letters"] + VOCABS["ascii_letters"] + VOCABS["punctuation"] + VOCABS["currency"] + VOCABS["digits"]
 
 VOCABS["latin"] = VOCABS["digits"] + VOCABS["ascii_letters"] + VOCABS["punctuation"]
 VOCABS["english"] = VOCABS["latin"] + "°" + VOCABS["currency"]
