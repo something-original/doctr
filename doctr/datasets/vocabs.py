@@ -12,8 +12,8 @@ __all__ = ["VOCABS"]
 VOCABS: Dict[str, str] = {
     "digits": string.digits,
     "ascii_letters": string.ascii_letters,
-    "punctuation": string.punctuation,
-    "currency": "£€¥¢฿₽",
+    "punctuation": ".,?!:;/%@_()«»-№\"",
+    "currency": "$",
     "ancient_greek": "αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ",
     "arabic_letters": "ءآأؤإئابةتثجحخدذرزسشصضطظعغـفقكلمنهوىي",
     "persian_letters": "پچڢڤگ",
