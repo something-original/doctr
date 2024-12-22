@@ -9,15 +9,21 @@ os.environ["USE_TORCH"] = "1"
 
 import datetime
 import hashlib
-import logging
-import multiprocessing as mp
+import multiprocessing
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
+
+# The following import is required for DDP
+import torch.distributed as dist
+import torch.multiprocessing as mp
+import wandb
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiplicativeLR, OneCycleLR, PolynomialLR
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader, SequentialSampler
+from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms.v2 import Compose, Normalize, RandomGrayscale, RandomPhotometricDistort
 from tqdm.auto import tqdm
 
@@ -134,7 +140,7 @@ def fit_one_epoch(model, train_loader, batch_transforms, optimizer, scheduler, a
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, batch_transforms, val_metric, amp=False):
+def evaluate(model, val_loader, batch_transforms, val_metric, args, amp=False):
     # Model in eval mode
     model.eval()
     # Reset val metric
@@ -167,59 +173,72 @@ def evaluate(model, val_loader, batch_transforms, val_metric, amp=False):
     return val_loss, recall, precision, mean_iou
 
 
-def main(args):
+def main(rank: int, world_size: int, args):
+    """
+    Args:
+        rank (int): device id to put the model on
+        world_size (int): number of processes participating in the job
+        args: other arguments passed through the CLI
+    """
+
     print(args)
 
-    if args.push_to_hub:
+    if rank == 0 and args.push_to_hub:
         login_to_hub()
 
     if not isinstance(args.workers, int):
-        args.workers = min(16, mp.cpu_count())
+        args.workers = min(16, multiprocessing.cpu_count())
 
     torch.backends.cudnn.benchmark = True
 
-    st = time.time()
-    val_set = DetectionDataset(
-        img_folder=os.path.join(args.val_path, "images"),
-        label_path=os.path.join(args.val_path, "labels.json"),
-        sample_transforms=T.SampleCompose(
-            (
-                [T.Resize((args.input_size, args.input_size), preserve_aspect_ratio=True, symmetric_pad=True)]
-                if not args.rotation or args.eval_straight
-                else []
-            )
-            + (
-                [
-                    T.Resize(args.input_size, preserve_aspect_ratio=True),  # This does not pad
-                    T.RandomApply(T.RandomRotate(90, expand=True), 0.5),
-                    T.Resize((args.input_size, args.input_size), preserve_aspect_ratio=True, symmetric_pad=True),
-                ]
-                if args.rotation and not args.eval_straight
-                else []
-            )
-        ),
-        use_polygons=args.rotation and not args.eval_straight,
-    )
-    val_loader = DataLoader(
-        val_set,
-        batch_size=args.batch_size,
-        drop_last=False,
-        num_workers=args.workers,
-        sampler=SequentialSampler(val_set),
-        pin_memory=torch.cuda.is_available(),
-        collate_fn=val_set.collate_fn,
-    )
-    print(f"Validation set loaded in {time.time() - st:.4}s ({len(val_set)} samples in {len(val_loader)} batches)")
-    with open(os.path.join(args.val_path, "labels.json"), "rb") as f:
-        val_hash = hashlib.sha256(f.read()).hexdigest()
+    if rank == 0:
+        # validation dataset related code
+        st = time.time()
+        val_set = DetectionDataset(
+            img_folder=os.path.join(args.val_path, "images"),
+            label_path=os.path.join(args.val_path, "labels.json"),
+            sample_transforms=T.SampleCompose(
+                (
+                    [T.Resize((args.input_size, args.input_size), preserve_aspect_ratio=True, symmetric_pad=True)]
+                    if not args.rotation or args.eval_straight
+                    else []
+                )
+                + (
+                    [
+                        T.Resize(args.input_size, preserve_aspect_ratio=True),  # This does not pad
+                        T.RandomApply(T.RandomRotate(90, expand=True), 0.5),
+                        T.Resize((args.input_size, args.input_size), preserve_aspect_ratio=True, symmetric_pad=True),
+                    ]
+                    if args.rotation and not args.eval_straight
+                    else []
+                )
+            ),
+            use_polygons=args.rotation and not args.eval_straight,
+        )
+        val_loader = DataLoader(
+            val_set,
+            batch_size=args.batch_size,
+            drop_last=False,
+            num_workers=args.workers,
+            sampler=SequentialSampler(val_set),
+            pin_memory=torch.cuda.is_available(),
+            collate_fn=val_set.collate_fn,
+        )
+        print(f"Validation set loaded in {time.time() - st:.4}s ({len(val_set)} samples in {len(val_loader)} batches)")
+        with open(os.path.join(args.val_path, "labels.json"), "rb") as f:
+            val_hash = hashlib.sha256(f.read()).hexdigest()
+
+        class_names = val_set.class_names
+    else:
+        class_names = None
 
     batch_transforms = Normalize(mean=(0.798, 0.785, 0.772), std=(0.264, 0.2749, 0.287))
 
-    # Load doctr model
+    # Load docTR model
     model = detection.__dict__[args.arch](
         pretrained=args.pretrained,
         assume_straight_pages=not args.rotation,
-        class_names=val_set.class_names,
+        class_names=class_names,
     )
 
     # Resume weights
@@ -228,27 +247,23 @@ def main(args):
         checkpoint = torch.load(args.resume, map_location="cpu")
         model.load_state_dict(checkpoint)
 
-    # GPU
-    if isinstance(args.device, int):
-        if not torch.cuda.is_available():
-            raise AssertionError("PyTorch cannot access your GPU. Please investigate!")
-        if args.device >= torch.cuda.device_count():
-            raise ValueError("Invalid device index")
-    # Silent default switch to GPU if available
-    elif torch.cuda.is_available():
-        args.device = 0
-    else:
-        logging.warning("No accessible GPU, target device set to CPU.")
-    if torch.cuda.is_available():
-        torch.cuda.set_device(args.device)
-        model = model.cuda()
+    # create default process group
+    device = torch.device("cuda", args.devices[rank])
+    dist.init_process_group(args.backend, rank=rank, world_size=world_size)
+    # create local model
+    model = model.to(device)
+    # construct the DDP model
+    model = DDP(model, device_ids=[device])
 
-    # Metrics
-    val_metric = LocalizationConfusion(use_polygons=args.rotation and not args.eval_straight)
+    if rank == 0:
+        # Metrics
+        val_metric = LocalizationConfusion(use_polygons=args.rotation and not args.eval_straight)
 
-    if args.test_only:
+    if rank == 0 and args.test_only:
         print("Running evaluation")
-        val_loss, recall, precision, mean_iou = evaluate(model, val_loader, batch_transforms, val_metric, amp=args.amp)
+        val_loss, recall, precision, mean_iou = evaluate(
+            model, val_loader, batch_transforms, val_metric, args, amp=args.amp
+        )
         print(
             f"Validation loss: {val_loss:.6} (Recall: {recall:.2%} | Precision: {precision:.2%} | "
             f"Mean IoU: {mean_iou:.2%})"
@@ -312,18 +327,19 @@ def main(args):
         batch_size=args.batch_size,
         drop_last=True,
         num_workers=args.workers,
-        sampler=RandomSampler(train_set),
+        sampler=DistributedSampler(train_set, num_replicas=world_size, rank=rank, shuffle=False, drop_last=True),
         pin_memory=torch.cuda.is_available(),
         collate_fn=train_set.collate_fn,
     )
     print(f"Train set loaded in {time.time() - st:.4}s ({len(train_set)} samples in {len(train_loader)} batches)")
+
     with open(os.path.join(args.train_path, "labels.json"), "rb") as f:
         train_hash = hashlib.sha256(f.read()).hexdigest()
 
-    if args.show_samples:
+    if rank == 0 and args.show_samples:
         x, target = next(iter(train_loader))
         plot_samples(x, target)
-        return
+        # return
 
     # Backbone freezing
     if args.freeze_backbone:
@@ -367,9 +383,7 @@ def main(args):
     exp_name = f"{args.arch}_{current_time}" if args.name is None else args.name
 
     # W&B
-    if args.wb:
-        import wandb
-
+    if rank == 0 and args.wb:
         run = wandb.init(
             name=exp_name,
             project="text-detection",
@@ -399,46 +413,55 @@ def main(args):
     # Training loop
     for epoch in range(args.epochs):
         fit_one_epoch(model, train_loader, batch_transforms, optimizer, scheduler, amp=args.amp)
-        # Validation loop at the end of each epoch
-        val_loss, recall, precision, mean_iou = evaluate(model, val_loader, batch_transforms, val_metric, amp=args.amp)
-        if val_loss < min_loss:
-            print(f"Validation loss decreased {min_loss:.6} --> {val_loss:.6}: saving state...")
-            torch.save(model.state_dict(), Path(args.output_dir) / f"{exp_name}.pt")
-            min_loss = val_loss
-        if args.save_interval_epoch:
-            print(f"Saving state at epoch: {epoch + 1}")
-            torch.save(model.state_dict(), Path(args.output_dir) / f"{exp_name}_epoch{epoch + 1}.pt")
-        log_msg = f"Epoch {epoch + 1}/{args.epochs} - Validation loss: {val_loss:.6} "
-        if any(val is None for val in (recall, precision, mean_iou)):
-            log_msg += "(Undefined metric value, caused by empty GTs or predictions)"
-        else:
-            log_msg += f"(Recall: {recall:.2%} | Precision: {precision:.2%} | Mean IoU: {mean_iou:.2%})"
-        print(log_msg)
-        # W&B
-        if args.wb:
-            wandb.log({
-                "val_loss": val_loss,
-                "recall": recall,
-                "precision": precision,
-                "mean_iou": mean_iou,
-            })
-        if args.early_stop and early_stopper.early_stop(val_loss):
-            print("Training halted early due to reaching patience limit.")
-            break
-    if args.wb:
-        run.finish()
 
-    if args.push_to_hub:
-        push_to_hf_hub(model, exp_name, task="detection", run_config=args)
+        if rank == 0:
+            # Validation loop at the end of each epoch
+            val_loss, recall, precision, mean_iou = evaluate(
+                model, val_loader, batch_transforms, val_metric, args, amp=args.amp
+            )
+            if val_loss < min_loss:
+                print(f"Validation loss decreased {min_loss:.6} --> {val_loss:.6}: saving state...")
+                torch.save(model.module.state_dict(), Path(args.output_dir) / f"{exp_name}.pt")
+                min_loss = val_loss
+            if args.save_interval_epoch:
+                print(f"Saving state at epoch: {epoch + 1}")
+                torch.save(model.module.state_dict(), Path(args.output_dir) / f"{exp_name}_epoch{epoch + 1}.pt")
+            log_msg = f"Epoch {epoch + 1}/{args.epochs} - Validation loss: {val_loss:.6} "
+            if any(val is None for val in (recall, precision, mean_iou)):
+                log_msg += "(Undefined metric value, caused by empty GTs or predictions)"
+            else:
+                log_msg += f"(Recall: {recall:.2%} | Precision: {precision:.2%} | Mean IoU: {mean_iou:.2%})"
+            print(log_msg)
+            # W&B
+            if args.wb:
+                wandb.log({
+                    "val_loss": val_loss,
+                    "recall": recall,
+                    "precision": precision,
+                    "mean_iou": mean_iou,
+                })
+            if args.early_stop and early_stopper.early_stop(val_loss):
+                print("Training halted early due to reaching patience limit.")
+                break
+
+    if rank == 0:
+        if args.wb:
+            run.finish()
+
+        if args.push_to_hub:
+            push_to_hf_hub(model, exp_name, task="detection", run_config=args)
 
 
 def parse_args():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="DocTR training script for text detection (PyTorch)",
+        description="DocTR DDP training script for text detection (PyTorch)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+
+    # DDP related args
+    parser.add_argument("--backend", default="nccl", type=str, help="backend to use for torch DDP")
 
     parser.add_argument("arch", type=str, help="text-detection model to train")
     parser.add_argument("--output_dir", type=str, default=".", help="path to save checkpoints and final model")
@@ -447,14 +470,14 @@ def parse_args():
     parser.add_argument("--name", type=str, default=None, help="Name of your training experiment")
     parser.add_argument("--epochs", type=int, default=10, help="number of epochs to train the model on")
     parser.add_argument("-b", "--batch_size", type=int, default=2, help="batch size for training")
-    parser.add_argument("--device", default=None, type=int, help="device")
+    parser.add_argument("--devices", default=None, nargs="+", type=int, help="GPU devices to use for training")
     parser.add_argument(
         "--save-interval-epoch", dest="save_interval_epoch", action="store_true", help="Save model every epoch"
     )
     parser.add_argument("--input_size", type=int, default=1024, help="model input size, H = W")
     parser.add_argument("--lr", type=float, default=0.001, help="learning rate for the optimizer (Adam or AdamW)")
     parser.add_argument("--wd", "--weight-decay", default=0, type=float, help="weight decay", dest="weight_decay")
-    parser.add_argument("-j", "--workers", type=int, default=None, help="number of workers used for dataloading")
+    parser.add_argument("-j", "--workers", type=int, default=0, help="number of workers used for dataloading")
     parser.add_argument("--resume", type=str, default=None, help="Path to your checkpoint")
     parser.add_argument("--test-only", dest="test_only", action="store_true", help="Run the validation loop")
     parser.add_argument(
@@ -493,4 +516,16 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args)
+    if not torch.cuda.is_available():
+        raise AssertionError("PyTorch cannot access your GPUs. Please investigate!")
+
+    if not isinstance(args.devices, list):
+        args.devices = list(range(torch.cuda.device_count()))
+    # no of process per gpu
+    nprocs = len(args.devices)
+    # Environment variables which need to be
+    # set when using c10d's default "env"
+    # initialization mode.
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "29500"
+    mp.spawn(main, args=(nprocs, args), nprocs=nprocs, join=True)

@@ -14,6 +14,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 import datetime
 import time
+from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
@@ -243,20 +244,45 @@ def main(args):
         plot_samples(x, [CLASSES[t] for t in target])
         return
 
+    # Scheduler
+    if args.sched == "exponential":
+        scheduler = optimizers.schedules.ExponentialDecay(
+            args.lr,
+            decay_steps=args.epochs * len(train_loader),
+            decay_rate=1 / (25e4),  # final lr as a fraction of initial lr
+            staircase=False,
+            name="ExponentialDecay",
+        )
+    elif args.sched == "poly":
+        scheduler = optimizers.schedules.PolynomialDecay(
+            args.lr,
+            decay_steps=args.epochs * len(train_loader),
+            end_learning_rate=1e-7,
+            power=1.0,
+            cycle=False,
+            name="PolynomialDecay",
+        )
+
     # Optimizer
-    scheduler = optimizers.schedules.ExponentialDecay(
-        args.lr,
-        decay_steps=args.epochs * len(train_loader),
-        decay_rate=1 / (1e3),  # final lr as a fraction of initial lr
-        staircase=False,
-        name="ExponentialDecay",
-    )
-    optimizer = optimizers.Adam(
-        learning_rate=scheduler,
-        beta_1=0.95,
-        beta_2=0.99,
-        epsilon=1e-6,
-    )
+    if args.optim == "adam":
+        optimizer = optimizers.Adam(
+            learning_rate=scheduler,
+            beta_1=0.95,
+            beta_2=0.999,
+            epsilon=1e-6,
+            clipnorm=5,
+            weight_decay=None if args.weight_decay == 0 else args.weight_decay,
+        )
+    elif args.optim == "adamw":
+        optimizer = optimizers.AdamW(
+            learning_rate=scheduler,
+            beta_1=0.9,
+            beta_2=0.999,
+            epsilon=1e-6,
+            clipnorm=5,
+            weight_decay=args.weight_decay or 1e-4,
+        )
+
     if args.amp:
         optimizer = mixed_precision.LossScaleOptimizer(optimizer)
 
@@ -276,8 +302,8 @@ def main(args):
         "batch_size": args.batch_size,
         "architecture": args.arch,
         "input_size": input_size,
-        "optimizer": "adam",
-        "framework": "pytorch",
+        "optimizer": args.optim,
+        "framework": "tensorflow",
         "classes": CLASSES,
         "scheduler": args.sched,
         "pretrained": args.pretrained,
@@ -308,7 +334,7 @@ def main(args):
         val_loss, acc = evaluate(model, val_loader, batch_transforms)
         if val_loss < min_loss:
             print(f"Validation loss decreased {min_loss:.6} --> {val_loss:.6}: saving state...")
-            model.save_weights(f"./{exp_name}.weights.h5")
+            model.save_weights(Path(args.output_dir) / f"{exp_name}.weights.h5")
             min_loss = val_loss
         print(f"Epoch {epoch + 1}/{args.epochs} - Validation loss: {val_loss:.6} (Acc: {acc:.2%})")
         # W&B
@@ -355,6 +381,7 @@ def parse_args():
     )
 
     parser.add_argument("arch", type=str, help="classification model to train")
+    parser.add_argument("--output_dir", type=str, default=".", help="path to save checkpoints and final model")
     parser.add_argument("--type", type=str, required=True, choices=["page", "crop"], help="type of data to train on")
     parser.add_argument("--train_path", type=str, help="path to training data folder")
     parser.add_argument("--val_path", type=str, required=True, help="path to validation data folder")
@@ -362,8 +389,8 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=10, help="number of epochs to train the model on")
     parser.add_argument("-b", "--batch_size", type=int, default=2, help="batch size for training")
     parser.add_argument("--device", default=None, type=int, help="device")
-    parser.add_argument("--lr", type=float, default=0.001, help="learning rate for the optimizer (Adam)")
     parser.add_argument("--wd", "--weight-decay", default=0, type=float, help="weight decay", dest="weight_decay")
+    parser.add_argument("--lr", type=float, default=0.001, help="learning rate for the optimizer (Adam or AdamW)")
     parser.add_argument("--resume", type=str, default=None, help="Path to your checkpoint")
     parser.add_argument("--test-only", dest="test_only", action="store_true", help="Run the validation loop")
     parser.add_argument(
@@ -379,7 +406,10 @@ def parse_args():
         help="Load pretrained parameters before starting the training",
     )
     parser.add_argument("--export-onnx", dest="export_onnx", action="store_true", help="Export the model to ONNX")
-    parser.add_argument("--sched", type=str, default="cosine", help="scheduler to use")
+    parser.add_argument("--optim", type=str, default="adam", choices=["adam", "adamw"], help="optimizer to use")
+    parser.add_argument(
+        "--sched", type=str, default="exponential", choices=["exponential", "poly"], help="scheduler to use"
+    )
     parser.add_argument("--amp", dest="amp", help="Use Automatic Mixed Precision", action="store_true")
     parser.add_argument("--find-lr", action="store_true", help="Gridsearch the optimal LR")
     parser.add_argument("--early-stop", action="store_true", help="Enable early stopping")

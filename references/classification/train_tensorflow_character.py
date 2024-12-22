@@ -14,6 +14,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 import datetime
 import time
+from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
@@ -233,20 +234,45 @@ def main(args):
         plot_samples(x, list(map(vocab.__getitem__, target)))
         return
 
+    # Scheduler
+    if args.sched == "exponential":
+        scheduler = optimizers.schedules.ExponentialDecay(
+            args.lr,
+            decay_steps=args.epochs * len(train_loader),
+            decay_rate=1 / (25e4),  # final lr as a fraction of initial lr
+            staircase=False,
+            name="ExponentialDecay",
+        )
+    elif args.sched == "poly":
+        scheduler = optimizers.schedules.PolynomialDecay(
+            args.lr,
+            decay_steps=args.epochs * len(train_loader),
+            end_learning_rate=1e-7,
+            power=1.0,
+            cycle=False,
+            name="PolynomialDecay",
+        )
+
     # Optimizer
-    scheduler = optimizers.schedules.ExponentialDecay(
-        args.lr,
-        decay_steps=args.epochs * len(train_loader),
-        decay_rate=1 / (1e3),  # final lr as a fraction of initial lr
-        staircase=False,
-        name="ExponentialDecay",
-    )
-    optimizer = optimizers.Adam(
-        learning_rate=scheduler,
-        beta_1=0.95,
-        beta_2=0.99,
-        epsilon=1e-6,
-    )
+    if args.optim == "adam":
+        optimizer = optimizers.Adam(
+            learning_rate=scheduler,
+            beta_1=0.95,
+            beta_2=0.999,
+            epsilon=1e-6,
+            clipnorm=5,
+            weight_decay=None if args.weight_decay == 0 else args.weight_decay,
+        )
+    elif args.optim == "adamw":
+        optimizer = optimizers.AdamW(
+            learning_rate=scheduler,
+            beta_1=0.9,
+            beta_2=0.999,
+            epsilon=1e-6,
+            clipnorm=5,
+            weight_decay=args.weight_decay or 1e-4,
+        )
+
     if args.amp:
         optimizer = mixed_precision.LossScaleOptimizer(optimizer)
 
@@ -263,6 +289,7 @@ def main(args):
     config = {
         "learning_rate": args.lr,
         "epochs": args.epochs,
+        "weight_decay": args.weight_decay,
         "batch_size": args.batch_size,
         "architecture": args.arch,
         "input_size": args.input_size,
@@ -298,7 +325,7 @@ def main(args):
         val_loss, acc = evaluate(model, val_loader, batch_transforms)
         if val_loss < min_loss:
             print(f"Validation loss decreased {min_loss:.6} --> {val_loss:.6}: saving state...")
-            model.save_weights(f"./{exp_name}.weights.h5")
+            model.save_weights(Path(args.output_dir) / f"{exp_name}.weights.h5")
             min_loss = val_loss
         print(f"Epoch {epoch + 1}/{args.epochs} - Validation loss: {val_loss:.6} (Acc: {acc:.2%})")
         # W&B
@@ -345,11 +372,13 @@ def parse_args():
     )
 
     parser.add_argument("arch", type=str, help="text-recognition model to train")
+    parser.add_argument("--output_dir", type=str, default=".", help="path to save checkpoints and final model")
     parser.add_argument("--name", type=str, default=None, help="Name of your training experiment")
     parser.add_argument("--epochs", type=int, default=10, help="number of epochs to train the model on")
     parser.add_argument("-b", "--batch_size", type=int, default=64, help="batch size for training")
     parser.add_argument("--input_size", type=int, default=32, help="input size H for the model, W = 4*H")
-    parser.add_argument("--lr", type=float, default=0.001, help="learning rate for the optimizer (Adam)")
+    parser.add_argument("--wd", "--weight-decay", default=0, type=float, help="weight decay", dest="weight_decay")
+    parser.add_argument("--lr", type=float, default=0.001, help="learning rate for the optimizer (Adam or AdamW)")
     parser.add_argument("--resume", type=str, default=None, help="Path to your checkpoint")
     parser.add_argument(
         "--font", type=str, default="FreeMono.ttf,FreeSans.ttf,FreeSerif.ttf", help="Font family to be used"
@@ -381,6 +410,10 @@ def parse_args():
         dest="pretrained",
         action="store_true",
         help="Load pretrained parameters before starting the training",
+    )
+    parser.add_argument("--optim", type=str, default="adam", choices=["adam", "adamw"], help="optimizer to use")
+    parser.add_argument(
+        "--sched", type=str, default="exponential", choices=["exponential", "poly"], help="scheduler to use"
     )
     parser.add_argument("--export-onnx", dest="export_onnx", action="store_true", help="Export the model to ONNX")
     parser.add_argument("--amp", dest="amp", help="Use Automatic Mixed Precision", action="store_true")

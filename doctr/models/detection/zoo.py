@@ -3,7 +3,7 @@
 # This program is licensed under the Apache License 2.0.
 # See LICENSE or go to <https://opensource.org/licenses/Apache-2.0> for full license details.
 
-from typing import Any, List
+from typing import Any
 
 from doctr.file_utils import is_tf_available, is_torch_available
 
@@ -14,7 +14,7 @@ from .predictor import DetectionPredictor
 
 __all__ = ["detection_predictor"]
 
-ARCHS: List[str]
+ARCHS: list[str]
 
 
 if is_tf_available():
@@ -56,7 +56,14 @@ def _predictor(arch: Any, pretrained: bool, assume_straight_pages: bool = True, 
         if isinstance(_model, detection.FAST):
             _model = reparameterize(_model)
     else:
-        if not isinstance(arch, (detection.DBNet, detection.LinkNet, detection.FAST)):
+        allowed_archs = [detection.DBNet, detection.LinkNet, detection.FAST]
+        if is_torch_available():
+            # Adding the type for torch compiled models to the allowed architectures
+            from doctr.models.utils import _CompiledModule
+
+            allowed_archs.append(_CompiledModule)
+
+        if not isinstance(arch, tuple(allowed_archs)):
             raise ValueError(f"unknown architecture: {type(arch)}")
 
         _model = arch
@@ -93,7 +100,6 @@ def detection_predictor(
     >>> out = model([input_page])
 
     Args:
-    ----
         arch: name of the architecture or model itself to use (e.g. 'db_resnet50')
         pretrained: If True, returns a model pre-trained on our text detection dataset
         assume_straight_pages: If True, fit straight boxes to the page
@@ -104,7 +110,6 @@ def detection_predictor(
         **kwargs: optional keyword arguments passed to the architecture
 
     Returns:
-    -------
         Detection predictor
     """
     return _predictor(

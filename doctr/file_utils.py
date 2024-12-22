@@ -9,7 +9,6 @@ import importlib.metadata
 import importlib.util
 import logging
 import os
-from typing import Optional
 
 CLASS_NAME: str = "words"
 
@@ -93,12 +92,11 @@ if not _torch_available and not _tf_available:  # pragma: no cover
     )
 
 
-def requires_package(name: str, extra_message: Optional[str] = None) -> None:  # pragma: no cover
+def requires_package(name: str, extra_message: str | None = None) -> None:  # pragma: no cover
     """
     package requirement helper
 
     Args:
-    ----
         name: name of the package
         extra_message: additional message to display if the package is not found
     """

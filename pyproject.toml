@@ -53,7 +53,8 @@ dependencies = [
 [project.optional-dependencies]
 tf = [
     # cf. https://github.com/mindee/doctr/pull/1461
-    "tensorflow>=2.15.0,<3.0.0",
+    "tensorflow[and-cuda]>=2.15.0,<3.0.0; sys_platform == 'linux'",
+    "tensorflow>=2.15.0,<3.0.0; sys_platform != 'linux'", # TensorFlow compatible for macOS and Windows
     "tf-keras>=2.15.0,<3.0.0",  # Keep keras 2 compatibility
     "tf2onnx>=1.16.0,<2.0.0",  # cf. https://github.com/onnx/tensorflow-onnx/releases/tag/v1.16.0
 ]
@@ -97,7 +98,8 @@ docs = [
 dev = [
     # Tensorflow
     # cf. https://github.com/mindee/doctr/pull/1461
-    "tensorflow>=2.15.0,<3.0.0",
+    "tensorflow[and-cuda]>=2.15.0,<3.0.0; sys_platform == 'linux'",
+    "tensorflow>=2.15.0,<3.0.0; sys_platform != 'linux'", # TensorFlow compatible for macOS and Windows
     "tf-keras>=2.15.0,<3.0.0",  # Keep keras 2 compatibility
     "tf2onnx>=1.16.0,<2.0.0",  # cf. https://github.com/onnx/tensorflow-onnx/releases/tag/v1.16.0
     # PyTorch
@@ -192,7 +194,7 @@ select = [
     "E", "W", "F", "I", "N", "Q", "C4", "T10", "LOG",
     "D101", "D103", "D201","D202","D207","D208","D214","D215","D300","D301","D417", "D419", "D207"  # pydocstyle
 ]
-ignore = ["E402", "E203", "F403", "E731", "N812", "N817", "C408"]
+ignore = ["E402", "E203", "F403", "E731", "N812", "N817", "C408", "LOG015"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["doctr", "app", "utils"]
