@@ -358,7 +358,7 @@ VOCABS["russian"] = (
     + _BASE_VOCABS["digits"]
     + _BASE_VOCABS["punctuation"]
     + _BASE_VOCABS["currency"]
-    + "₽"
+    + "₽" + "№" + "«" + "»‎"
 )
 
 VOCABS["belarusian"] = (
