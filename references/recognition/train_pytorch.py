@@ -40,6 +40,7 @@ from doctr.datasets import VOCABS, RecognitionDataset, WordGenerator
 from doctr.models import login_to_hub, push_to_hf_hub, recognition
 from doctr.utils.metrics import TextMatch
 from utils import EarlyStopper, plot_recorder, plot_samples
+from clearml import Task
 
 
 def record_lr(
@@ -519,13 +520,11 @@ def main(args):
 
     # ClearML
     if rank == 0 and args.clearml:
-        from clearml import Task
-
         task = Task.init(project_name="docTR/text-recognition", task_name=exp_name, reuse_last_task_id=False)
         task.upload_artifact("config", config)
 
         def clearml_log_at_step(train_loss=None, val_loss=None, lr=None):
-            logger = Logger.current_logger()
+            logger = Task.current_task().get_logger()
             if train_loss is not None:
                 logger.report_scalar(
                     title="Training Step Loss",
@@ -606,9 +605,7 @@ def main(args):
 
             # ClearML
             if args.clearml:
-                from clearml import Logger
-
-                logger = Logger.current_logger()
+                logger = Task.current_task().get_logger()
                 logger.report_scalar(title="Training Loss", series="train_loss", value=train_loss, iteration=epoch)
                 logger.report_scalar(title="Validation Loss", series="val_loss", value=val_loss, iteration=epoch)
                 logger.report_scalar(title="Learning Rate", series="lr", value=actual_lr, iteration=epoch)
